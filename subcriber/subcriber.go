@@ -63,9 +63,9 @@ func SubscribeTxCreate(
 			return
 		}
 
-		// ---------------------------------------------
-		// 4) Apply UTXO update ATOMICALLY (Redis pipeline)
-		// ---------------------------------------------
+		// // ---------------------------------------------
+		// // 4) Apply UTXO update ATOMICALLY (Redis pipeline)
+		// // ---------------------------------------------
 		if err := utxoSet.UpdateWithTransaction(tx); err != nil {
 			fmt.Println("ERROR applying UTXO update:", err)
 			return

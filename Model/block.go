@@ -76,7 +76,7 @@ func (bc *Blockchain) AddTransactionToBlock(tx Transaction, utxoSet *RedisCache)
 	current.Transactions = append(current.Transactions, tx)
 
 	// STEP 4: UTXO update
-	utxoSet.UpdateWithTransaction(tx)
+	//utxoSet.UpdateWithTransaction(tx)
 
 	// STEP 5: update Merkle + Hash
 	current.MerkleRoot = ComputeMerkleRoot(current.Transactions)

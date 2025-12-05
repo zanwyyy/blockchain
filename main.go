@@ -122,7 +122,7 @@ func main() {
 
 	// If want stress test, uncomment:
 
-	for i := 0; i < 5000; i++ {
+	for i := 0; i < 30000; i++ {
 		go func() {
 			ev := events.TxCreateRequest{
 				PrivateKeyHex: hex.EncodeToString(bobPriv.Serialize()),
