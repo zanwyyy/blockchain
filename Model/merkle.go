@@ -1,7 +1,7 @@
 package model
 
 import (
-	"crypto/sha256"
+	"github.com/minio/sha256-simd"
 )
 
 type TxMerkleItem struct {

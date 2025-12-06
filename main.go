@@ -106,6 +106,18 @@ func main() {
 	// ----------------------------------------------------
 	// 6) TEST: Publish 1 TxCreate request
 	// ----------------------------------------------------
+	event := events.TxCreateRequest{
+		PrivateKeyHex: model.PrivToSeedHex(alicePriv),
+		FromAddr:      aliceAddr,
+		ToAddr:        bobAddr,
+		Amount:        30000,
+	}
+
+	fmt.Println("\n== Test: Publishing tx.create event ==")
+	err = ps.PublishTxCreate(ctx, event)
+	if err != nil {
+		log.Println("PublishTxCreate error:", err)
+	}
 	time.Sleep(2 * time.Second)
 
 	fmt.Println("\n== Test: Publishing tx.create event ==")

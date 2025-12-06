@@ -2,15 +2,16 @@ package model
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/minio/sha256-simd"
 )
 
-const MaxBlockSizeBytes = 4 * 1024 * 1024 // 4 MB
+const MaxBlockSizeBytes = 1024 * 1024 // 4 MB
 
 type Block struct {
 	Timestamp    int64

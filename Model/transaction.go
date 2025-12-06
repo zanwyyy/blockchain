@@ -4,7 +4,6 @@ package model
 import (
 	"bytes"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -12,6 +11,7 @@ import (
 	"log"
 	"project/helper"
 
+	"github.com/minio/sha256-simd"
 	"golang.org/x/crypto/ripemd160"
 )
 
