@@ -3,6 +3,7 @@ package model
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -11,8 +12,6 @@ import (
 	"log"
 	"project/helper"
 
-	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"golang.org/x/crypto/ripemd160"
 )
 
@@ -50,21 +49,6 @@ func (spk *ScriptPubKey) Serialize() map[string]interface{} {
 	}
 }
 
-// NewKeyPair returns secp256k1 priv/pub
-func NewKeyPair() (*btcec.PrivateKey, *btcec.PublicKey) {
-	priv, err := btcec.NewPrivateKey()
-	if err != nil {
-		log.Panic(err)
-	}
-	return priv, priv.PubKey()
-}
-
-// AddressFromPub returns the pubKeyHash hex as "address" (simplified)
-func AddressFromPub(pub *btcec.PublicKey) string {
-	h := HashPubKey(pub.SerializeCompressed())
-	return hex.EncodeToString(h)
-}
-
 // HashPubKey = SHA256(pubkey) then RIPEMD160 (like Bitcoin)
 func HashPubKey(pubkey []byte) []byte {
 	sha := sha256.Sum256(pubkey)
@@ -99,10 +83,12 @@ func MakeP2PKHScriptPubKey(addr string) ScriptPubKey {
 // - other inputs' ScriptSig.Hex = ""
 // - hash that copy and sign with priv
 // Then set original tx.Vin[i].ScriptSig.Hex = sigHex and ASM = sigHex + " " + pubkeyHex
-func (t *Transaction) Sign(priv *btcec.PrivateKey, utxoSet *RedisCache) error {
+func (t *Transaction) SignEd25519(priv ed25519.PrivateKey, utxoSet *RedisCache) error {
 	if len(t.Vin) == 0 {
 		return errors.New("no inputs to sign")
 	}
+
+	pub := priv.Public().(ed25519.PublicKey)
 
 	for inIdx := range t.Vin {
 		vin := &t.Vin[inIdx]
@@ -113,40 +99,31 @@ func (t *Transaction) Sign(priv *btcec.PrivateKey, utxoSet *RedisCache) error {
 			return fmt.Errorf("cannot sign: missing UTXO %s[%d]", vin.Txid, vin.Vout)
 		}
 
-		// 2. Create txCopy with empty scriptSig
+		// 2. Create txCopy with empty scriptsig
 		txCopy := t.ShallowCopyEmptySigs()
 
-		// 3. Replace THIS input's scriptSig with ScriptPubKey (raw bytes)
+		// 3. Replace THIS input's scriptSig with ScriptPubKey
 		txCopy.Vin[inIdx].ScriptSig.Hex = utxo.Vout.ScriptPubKey.Hex
 
 		// 4. Serialize txCopy
 		raw := txCopy.Serialize()
 
-		// 5. Double SHA256
+		// 5. Double SHA256 (keep Bitcoin sighash approach)
 		h1 := sha256.Sum256(raw)
 		h2 := sha256.Sum256(h1[:])
 		sighash := h2[:]
 
-		// 6. Sign with ECDSA
-		sig := ecdsa.Sign(priv, sighash)
-		sigDER := sig.Serialize()
+		// 6. SIGN using Ed25519
+		sig := ed25519.Sign(priv, sighash) // ALWAYS 64 bytes
 
-		// 7. Compressed pubkey
-		pubBytes := priv.PubKey().SerializeCompressed()
+		// 7. Build scriptSig = sig(64 bytes) || pub(32 bytes)
+		script := append(sig, pub...) // total 96 bytes
 
-		// 8. Build scriptSig = [sigLen][sigDER][pubLen][pubBytes]
-		buf := new(bytes.Buffer)
-		buf.WriteByte(byte(len(sigDER)))
-		buf.Write(sigDER)
-		buf.WriteByte(byte(len(pubBytes)))
-		buf.Write(pubBytes)
-
-		// store into input
-		vin.ScriptSig.Hex = hex.EncodeToString(buf.Bytes())
-		vin.ScriptSig.ASM = fmt.Sprintf("%x %x", sigDER, pubBytes)
+		vin.ScriptSig.Hex = hex.EncodeToString(script)
+		vin.ScriptSig.ASM = fmt.Sprintf("%x %x", sig, pub)
 	}
 
-	// update txid
+	// 8. update txid
 	t.Txid = t.ComputeTxID()
 	return nil
 }
@@ -182,7 +159,7 @@ func VerifyUTXO(t *Transaction, utxoSet *RedisCache) bool {
 		}
 
 		// -----------------------------
-		// 1) PARSE SCRIPTSIG (raw bytes)
+		// 1) PARSE scriptsig = sig(64) || pub(32)
 		// -----------------------------
 		scriptBytes, err := hex.DecodeString(vin.ScriptSig.Hex)
 		if err != nil {
@@ -190,47 +167,26 @@ func VerifyUTXO(t *Transaction, utxoSet *RedisCache) bool {
 			return false
 		}
 
-		if len(scriptBytes) < 2 {
-			log.Println("scriptSig too short")
+		if len(scriptBytes) != 96 {
+			log.Println("scriptSig wrong length, expected 96 bytes")
 			return false
 		}
 
-		// script format:
-		// [sigLen][sigBytes...][pubLen][pubBytes...]
-
-		sigLen := int(scriptBytes[0])
-		if len(scriptBytes) < 1+sigLen+1 {
-			log.Println("scriptSig malformed (sig)")
-			return false
-		}
-
-		sigBytes := scriptBytes[1 : 1+sigLen]
-
-		pubLenIndex := 1 + sigLen
-		pubLen := int(scriptBytes[pubLenIndex])
-
-		if len(scriptBytes) < pubLenIndex+1+pubLen {
-			log.Println("scriptSig malformed (pub)")
-			return false
-		}
-
-		pubBytes := scriptBytes[pubLenIndex+1 : pubLenIndex+1+pubLen]
+		sigBytes := scriptBytes[:64]
+		pubBytes := scriptBytes[64:96]
 
 		// -----------------------------
 		// 2) Compare pubkeyHash to ScriptPubKey
 		// -----------------------------
 		pubKeyHashCalc := HashPubKey(pubBytes)
 
-		// ScriptPubKey.Hex = raw P2PKH bytes:
-		// [76 a9 14] [20-byte hash] [88 ac]
 		spk, err := hex.DecodeString(utxo.Vout.ScriptPubKey.Hex)
 		if err != nil || len(spk) < 25 {
 			log.Println("invalid scriptPubKey")
 			return false
 		}
 
-		// get embedded pubkeyhash from scriptPubKey
-		expectedHash := spk[3 : 3+20] // 20 bytes after 0xa9 0x14
+		expectedHash := spk[3 : 3+20] // actual hash160(pub)
 
 		if !bytes.Equal(pubKeyHashCalc, expectedHash) {
 			log.Println("pubkey hash mismatch")
@@ -240,14 +196,9 @@ func VerifyUTXO(t *Transaction, utxoSet *RedisCache) bool {
 		// -----------------------------
 		// 3) Compute SIGHASH
 		// -----------------------------
-		// txCopy with scriptSig replaced by ScriptPubKey for THIS input
 		txCopy := t.ShallowCopyEmptySigs()
+		txCopy.Vin[inIdx].ScriptSig.Hex = hex.EncodeToString(spk)
 
-		// Set scriptSig = ScriptPubKey.raw (P2PKH)
-		scriptPubKeyRaw := spk // already decoded
-		txCopy.Vin[inIdx].ScriptSig.Hex = hex.EncodeToString(scriptPubKeyRaw)
-
-		// Serialize txCopy
 		raw := txCopy.Serialize()
 
 		h1 := sha256.Sum256(raw)
@@ -255,26 +206,13 @@ func VerifyUTXO(t *Transaction, utxoSet *RedisCache) bool {
 		sighash := h2[:]
 
 		// -----------------------------
-		// 4) Verify ECDSA signature
+		// 4) Verify ED25519 signature
 		// -----------------------------
-		sigParsed, err := ecdsa.ParseDERSignature(sigBytes)
-		if err != nil {
-			log.Println("parse DER failed")
-			return false
-		}
-
-		pubKey, err := btcec.ParsePubKey(pubBytes)
-		if err != nil {
-			log.Println("parse pubkey failed")
-			return false
-		}
-
-		if !sigParsed.Verify(sighash, pubKey) {
+		if !ed25519.Verify(ed25519.PublicKey(pubBytes), sighash, sigBytes) {
 			log.Println("signature invalid")
 			return false
 		}
 
-		// sum input value
 		inputSum += utxo.Vout.Value
 	}
 
@@ -339,7 +277,7 @@ func (t *Transaction) ShallowCopyEmptySigs() Transaction {
 }
 
 func CreateTransaction(
-	priv *btcec.PrivateKey,
+	priv ed25519.PrivateKey,
 	fromAddr string,
 	toAddr string,
 	amount int64,
@@ -408,7 +346,7 @@ func CreateTransaction(
 	}
 
 	// --- STEP 4: Ký transaction ---
-	signErr := tx.Sign(priv, utxoSet)
+	signErr := tx.SignEd25519(priv, utxoSet)
 	if signErr != nil {
 		return Transaction{}, signErr
 	}

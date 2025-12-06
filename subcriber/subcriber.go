@@ -9,15 +9,16 @@ import (
 	model "project/Model"
 	"project/events"
 
+	"crypto/ed25519"
+
 	"cloud.google.com/go/pubsub"
-	"github.com/btcsuite/btcd/btcec/v2"
 )
 
 func SubscribeTxCreate(
 	ctx context.Context,
 	sub *pubsub.Subscription,
 	utxoSet *model.RedisCache,
-	bc *model.Blockchain, // in-memory block builder
+	bc *model.Blockchain,
 ) error {
 
 	return sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
@@ -29,26 +30,34 @@ func SubscribeTxCreate(
 			return
 		}
 
-		// Decode private key
-		pkBytes, _ := hex.DecodeString(req.PrivateKeyHex)
-		privKey, _ := btcec.PrivKeyFromBytes(pkBytes)
+		// 🔐 Decode seed → Ed25519 private key
+		seedBytes, err := hex.DecodeString(req.PrivateKeyHex)
+		if err != nil {
+			fmt.Println("ERROR decoding private key:", err)
+			return
+		}
+		if len(seedBytes) != ed25519.SeedSize {
+			fmt.Println("ERROR: invalid seed length, must be 32 bytes")
+			return
+		}
+		privKey := ed25519.NewKeyFromSeed(seedBytes)
 
 		// ---------------------------------------------
-		// 1) LOCK THE ADDRESS (per-address locking)
+		// 1) Per-address lock
 		// ---------------------------------------------
 		mu := model.GetAddrLock(req.FromAddr)
 		mu.Lock()
 		defer mu.Unlock()
 
 		// ---------------------------------------------
-		// 2) Create the transaction
+		// 2) Create transaction
 		// ---------------------------------------------
 		tx, err := model.CreateTransaction(
-			privKey,
+			privKey, // ⚡ now Ed25519
 			req.FromAddr,
 			req.ToAddr,
 			req.Amount,
-			utxoSet, // RedisCache as UTXO provider
+			utxoSet,
 		)
 		if err != nil {
 			fmt.Println("ERROR creating tx:", err)
@@ -56,29 +65,27 @@ func SubscribeTxCreate(
 		}
 
 		// ---------------------------------------------
-		// 3) Verify (signature + UTXO)
+		// 3) Verify
 		// ---------------------------------------------
 		if ok := model.VerifyUTXO(&tx, utxoSet); !ok {
 			fmt.Println("ERROR verifying tx:", tx.Txid)
 			return
 		}
 
-		// // ---------------------------------------------
-		// // 4) Apply UTXO update ATOMICALLY (Redis pipeline)
-		// // ---------------------------------------------
+		// ---------------------------------------------
+		// 4) Apply UTXO update
+		// ---------------------------------------------
 		if err := utxoSet.UpdateWithTransaction(tx); err != nil {
 			fmt.Println("ERROR applying UTXO update:", err)
 			return
 		}
 
 		// ---------------------------------------------
-		// 5) Add TX to current block (in-memory)
+		// 5) Add TX to block builder
 		// ---------------------------------------------
 		if err := bc.AddTransactionToBlock(tx, utxoSet); err != nil {
 			fmt.Println("ERROR adding tx to block:", err)
-			// Optionally: rollback Redis here (rare)
 			return
 		}
-
 	})
 }

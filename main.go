@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
@@ -112,7 +111,7 @@ func main() {
 	fmt.Println("\n== Test: Publishing tx.create event ==")
 
 	testEvent := events.TxCreateRequest{
-		PrivateKeyHex: hex.EncodeToString(alicePriv.Serialize()),
+		PrivateKeyHex: model.PrivToSeedHex(alicePriv),
 		FromAddr:      aliceAddr,
 		ToAddr:        bobAddr,
 		Amount:        30000,
@@ -125,7 +124,7 @@ func main() {
 	for i := 0; i < 30000; i++ {
 		go func() {
 			ev := events.TxCreateRequest{
-				PrivateKeyHex: hex.EncodeToString(bobPriv.Serialize()),
+				PrivateKeyHex: model.PrivToSeedHex(bobPriv),
 				FromAddr:      bobAddr,
 				ToAddr:        aliceAddr,
 				Amount:        1,
