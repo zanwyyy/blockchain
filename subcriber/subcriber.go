@@ -30,7 +30,6 @@ func SubscribeTxCreate(
 			return
 		}
 
-		// 🔐 Decode seed → Ed25519 private key
 		seedBytes, err := hex.DecodeString(req.PrivateKeyHex)
 		if err != nil {
 			fmt.Println("ERROR decoding private key:", err)
@@ -42,18 +41,14 @@ func SubscribeTxCreate(
 		}
 		privKey := ed25519.NewKeyFromSeed(seedBytes)
 
-		// ---------------------------------------------
 		// 1) Per-address lock
-		// ---------------------------------------------
 		mu := model.GetAddrLock(req.FromAddr)
 		mu.Lock()
 		defer mu.Unlock()
 
-		// ---------------------------------------------
 		// 2) Create transaction
-		// ---------------------------------------------
 		tx, err := model.CreateTransaction(
-			privKey, // ⚡ now Ed25519
+			privKey,
 			req.FromAddr,
 			req.ToAddr,
 			req.Amount,
@@ -64,25 +59,19 @@ func SubscribeTxCreate(
 			return
 		}
 
-		// ---------------------------------------------
 		// 3) Verify
-		// ---------------------------------------------
 		if ok := model.VerifyUTXO(&tx, utxoSet); !ok {
 			fmt.Println("ERROR verifying tx:", tx.Txid)
 			return
 		}
 
-		// ---------------------------------------------
 		// 4) Apply UTXO update
-		// ---------------------------------------------
 		if err := utxoSet.UpdateWithTransaction(tx); err != nil {
 			fmt.Println("ERROR applying UTXO update:", err)
 			return
 		}
 
-		// ---------------------------------------------
 		// 5) Add TX to block builder
-		// ---------------------------------------------
 		if err := bc.AddTransactionToBlock(tx, utxoSet); err != nil {
 			fmt.Println("ERROR adding tx to block:", err)
 			return

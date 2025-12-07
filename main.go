@@ -131,8 +131,6 @@ func main() {
 
 	ps.PublishTxCreate(ctx, testEvent)
 
-	// If want stress test, uncomment:
-
 	for i := 0; i < 30000; i++ {
 		go func() {
 			ev := events.TxCreateRequest{
@@ -145,19 +143,9 @@ func main() {
 			if err != nil {
 				fmt.Printf("Published tx.create from Bob to Alice: %v\n", err)
 			}
-			// ev2 := events.TxCreateRequest{
-			// 	PrivateKeyHex: hex.EncodeToString(alicePriv.Serialize()),
-			// 	FromAddr:      aliceAddr,
-			// 	ToAddr:        bobAddr,
-			// 	Amount:        1,
-			// }
-			// ps.PublishTxCreate(ctx, ev2)
 		}()
 	}
 
-	// ----------------------------------------------------
-	// 7) Show blockchain state every second
-	// ----------------------------------------------------
 	for {
 		fmt.Println("Blocks:", len(bc.Blocks),
 			"Tx in block 0:", len(bc.Blocks[0].Transactions))
