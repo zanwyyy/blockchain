@@ -17,8 +17,10 @@ import (
 func SubscribeTxCreate(
 	ctx context.Context,
 	sub *pubsub.Subscription,
-	utxoSet *model.RedisCache,
+	utxoSet *model.RedisCache, // canonical UTXO (read-only here)
+	mempool *model.RedisMempool, // mempool overlay
 	bc *model.Blockchain,
+	walletManager *model.WalletManager,
 ) error {
 
 	return sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
@@ -30,50 +32,71 @@ func SubscribeTxCreate(
 			return
 		}
 
+		// -----------------------------
+		// 1) Build private key
+		// -----------------------------
 		seedBytes, err := hex.DecodeString(req.PrivateKeyHex)
-		if err != nil {
-			fmt.Println("ERROR decoding private key:", err)
-			return
-		}
-		if len(seedBytes) != ed25519.SeedSize {
-			fmt.Println("ERROR: invalid seed length, must be 32 bytes")
+		if err != nil || len(seedBytes) != ed25519.SeedSize {
+			fmt.Println("ERROR invalid private key")
 			return
 		}
 		privKey := ed25519.NewKeyFromSeed(seedBytes)
 
-		// 1) Per-address lock
+		// -----------------------------
+		// 2) Per-address lock
+		// -----------------------------
 		mu := model.GetAddrLock(req.FromAddr)
 		mu.Lock()
 		defer mu.Unlock()
 
-		// 2) Create transaction
+		wallet := walletManager.GetWallet(req.FromAddr, utxoSet)
+		if wallet == nil {
+			fmt.Println("ERROR wallet not found for address:", req.FromAddr)
+			return
+		}
+
+		// -----------------------------
+		// 3) Create transaction
+		// (uses canonical UTXO + mempool outputs internally)
+		// -----------------------------
 		tx, err := model.CreateTransaction(
 			privKey,
 			req.FromAddr,
 			req.ToAddr,
 			req.Amount,
 			utxoSet,
+			mempool,
+			wallet,
 		)
 		if err != nil {
 			fmt.Println("ERROR creating tx:", err)
 			return
 		}
 
-		// 3) Verify
-		if ok := model.VerifyUTXO(&tx, utxoSet); !ok {
+		// -----------------------------
+		// 4) Verify for mempool
+		// -----------------------------
+		if ok := model.VerifyForMempool(&tx, utxoSet, mempool); !ok {
 			fmt.Println("ERROR verifying tx:", tx.Txid)
 			return
 		}
 
-		// 4) Apply UTXO update
-		if err := utxoSet.UpdateWithTransaction(tx); err != nil {
-			fmt.Println("ERROR applying UTXO update:", err)
+		// -----------------------------
+		// 5) Add to mempool (NOT UTXO)
+		// -----------------------------
+		if err := mempool.AddTransaction(tx); err != nil {
+			fmt.Println("ERROR adding tx to mempool:", err)
 			return
 		}
 
-		// 5) Add TX to block builder
-		if err := bc.AddTransactionToBlock(tx, utxoSet); err != nil {
-			fmt.Println("ERROR adding tx to block:", err)
+		// 6) update wallet local utxo view
+		walletManager.ApplyUnconfirmedTx(tx)
+
+		// -----------------------------
+		// 6) Notify block builder
+		// -----------------------------
+		if err := bc.AddTransactionToBlock(tx); err != nil {
+			fmt.Println("ERROR adding tx to block builder:", err)
 			return
 		}
 	})

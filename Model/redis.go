@@ -13,7 +13,6 @@ import (
 type RedisCache struct {
 	ctx context.Context
 	rdb *redis.Client
-	// NOTE: no bdb reference here — Redis-only cache layer.
 }
 
 func NewRedisCache(addr string) *RedisCache {

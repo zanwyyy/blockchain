@@ -54,7 +54,7 @@ func NewBlockchain() *Blockchain {
 	return &Blockchain{Blocks: []*Block{genesis}}
 }
 
-func (bc *Blockchain) AddTransactionToBlock(tx Transaction, utxoSet *RedisCache) error {
+func (bc *Blockchain) AddTransactionToBlock(tx Transaction) error {
 	//STEP 1: Validate
 	// if !VerifyUTXO(&tx, utxoSet) {
 	// 	return fmt.Errorf("transaction validation failed")
@@ -73,11 +73,8 @@ func (bc *Blockchain) AddTransactionToBlock(tx Transaction, utxoSet *RedisCache)
 		current = newBlock
 	}
 
-	// STEP 3: Add TX
+	// STEP 3: Add TXss
 	current.Transactions = append(current.Transactions, tx)
-
-	// STEP 4: UTXO update
-	//utxoSet.UpdateWithTransaction(tx)
 
 	// STEP 5: update Merkle + Hash
 	current.MerkleRoot = ComputeMerkleRoot(current.Transactions)

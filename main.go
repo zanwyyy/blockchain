@@ -11,38 +11,45 @@ import (
 
 	model "project/Model"
 	"project/events"
+	"project/metrics"
 	pubsub2 "project/pubsub"
 	subscriber "project/subcriber"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
+	// -------------------------------
+	// 0) METRICS SERVER
+	// -------------------------------
+	go startMetricsServer()
+
 	// Use all CPU cores
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
-	// Start pprof for performance debugging
-	go func() {
-		fmt.Println("pprof running at http://localhost:6060/debug/pprof/")
-		if err := http.ListenAndServe("localhost:6060", nil); err != nil {
-			fmt.Println("pprof error:", err)
-		}
-	}()
+	fmt.Println("=== Blockchain Demo (Redis UTXO + WalletManager) ===")
 
-	fmt.Println("=== Blockchain Demo (Redis UTXO + Per-Address Locks) ===")
-
-	// ----------------------------------------------------
-	// 1) INIT Redis UTXO Set  (NO BADGER)
-	// ----------------------------------------------------
+	// -------------------------------
+	// 1) INIT REDIS
+	// -------------------------------
 	redisUTXO := model.NewRedisCache("localhost:6379")
+	redisMempool := model.NewRedisMempool("localhost:6380")
 	defer redisUTXO.Close()
+	defer redisMempool.Close()
 
-	// ----------------------------------------------------
-	// 2) INIT Blockchain (block builder)
-	// ----------------------------------------------------
+	// -------------------------------
+	// 2) INIT BLOCKCHAIN
+	// -------------------------------
 	bc := model.InitBlockchain("./blocks")
 
-	// ----------------------------------------------------
-	// 3) Create Wallet Keys
-	// ----------------------------------------------------
+	// -------------------------------
+	// 3) INIT WALLET MANAGER
+	// -------------------------------
+	walletManager := model.NewWalletManager()
+
+	// -------------------------------
+	// 4) CREATE KEYS
+	// -------------------------------
 	alicePriv, alicePub := model.NewKeyPair()
 	bobPriv, bobPub := model.NewKeyPair()
 
@@ -52,15 +59,15 @@ func main() {
 	fmt.Println("Alice Address:", aliceAddr)
 	fmt.Println("Bob   Address:", bobAddr)
 
-	// ----------------------------------------------------
-	// 4) Create Genesis UTXO for Alice
-	// ----------------------------------------------------
+	// -------------------------------
+	// 5) GENESIS UTXO (ALICE)
+	// -------------------------------
 	genesis := model.Transaction{
 		Version: 1,
 		Vin:     nil,
 		Vout: []model.VOUT{
 			{
-				Value:        500000, // genesis money
+				Value:        500000,
 				N:            0,
 				ScriptPubKey: model.MakeP2PKHScriptPubKey(aliceAddr),
 			},
@@ -69,11 +76,10 @@ func main() {
 	}
 	genesis.Txid = genesis.ComputeTxID()
 
-	fmt.Println("\n== Insert genesis UTXO to Redis == ")
+	fmt.Println("\n== Insert genesis UTXO to Redis ==")
 
 	for _, out := range genesis.Vout {
-		err := redisUTXO.Put(genesis.Txid, out.N, out)
-		if err != nil {
+		if err := redisUTXO.Put(genesis.Txid, out.N, out); err != nil {
 			log.Fatal("Insert genesis UTXO failed:", err)
 		}
 	}
@@ -81,9 +87,17 @@ func main() {
 	fmt.Println("Genesis done. UTXO count for Alice:",
 		len(redisUTXO.FindUTXOsByAddress(aliceAddr)))
 
-	// ----------------------------------------------------
-	// 5) START PUBSUB CONSUMER (SubscribeTxCreate)
-	// ----------------------------------------------------
+	// 👉 IMPORTANT: preload Alice wallet once
+	aliceWallet := walletManager.GetWallet(aliceAddr, redisUTXO)
+	fmt.Println("Alice wallet initialized with",
+		len(aliceWallet.GetSpendableUTXOs(redisMempool)), "UTXOs")
+	bobWallet := walletManager.GetWallet(bobAddr, redisUTXO)
+	fmt.Println("Bob wallet initialized with",
+		len(bobWallet.GetSpendableUTXOs(redisMempool)), "UTXOs")
+
+	// -------------------------------
+	// 6) START SUBSCRIBER
+	// -------------------------------
 	ctx := context.Background()
 
 	ps, err := pubsub2.NewPubSubClient(ctx, "thesis")
@@ -95,43 +109,47 @@ func main() {
 
 	fmt.Println("\n== Subscriber: Listening tx.create ==")
 
-	//consumer: on tx.create → create tx → verify → update UTXO → add to block
 	go func() {
-		err := subscriber.SubscribeTxCreate(ctx, sub, redisUTXO, bc)
+		err := subscriber.SubscribeTxCreate(
+			ctx,
+			sub,
+			redisUTXO,
+			redisMempool,
+			bc,
+			walletManager, // 👈 NEW
+		)
 		if err != nil {
 			log.Println("SubscribeTxCreate error:", err)
 		}
 	}()
 
-	// ----------------------------------------------------
-	// 6) TEST: Publish 1 TxCreate request
-	// ----------------------------------------------------
-	event := events.TxCreateRequest{
+	// -------------------------------
+	// 7) TEST EVENTS
+	// -------------------------------
+	fmt.Println("\n== Test: Publishing tx.create (Alice → Bob) ==")
+
+	ev1 := events.TxCreateRequest{
 		PrivateKeyHex: model.PrivToSeedHex(alicePriv),
 		FromAddr:      aliceAddr,
 		ToAddr:        bobAddr,
 		Amount:        30000,
 	}
 
-	fmt.Println("\n== Test: Publishing tx.create event ==")
-	err = ps.PublishTxCreate(ctx, event)
-	if err != nil {
+	if err := ps.PublishTxCreate(ctx, ev1); err != nil {
 		log.Println("PublishTxCreate error:", err)
 	}
+
 	time.Sleep(2 * time.Second)
-
-	fmt.Println("\n== Test: Publishing tx.create event ==")
-
-	testEvent := events.TxCreateRequest{
-		PrivateKeyHex: model.PrivToSeedHex(alicePriv),
-		FromAddr:      aliceAddr,
-		ToAddr:        bobAddr,
-		Amount:        30000,
+	for _, wallet := range walletManager.Wallets {
+		fmt.Printf("Wallet %s has %d UTXOs (including mempool)\n",
+			wallet.Address,
+			len(wallet.GetSpendableUTXOs(redisMempool)),
+		)
 	}
+	fmt.Println("\n== Test: Publishing tx.create again (Alice → Bob) ==")
 
-	ps.PublishTxCreate(ctx, testEvent)
-
-	for i := 0; i < 30000; i++ {
+	// Stress test Bob → Alice
+	for i := 0; i < 10000; i++ {
 		go func() {
 			ev := events.TxCreateRequest{
 				PrivateKeyHex: model.PrivToSeedHex(bobPriv),
@@ -139,16 +157,34 @@ func main() {
 				ToAddr:        aliceAddr,
 				Amount:        1,
 			}
-			err := ps.PublishTxCreate(ctx, ev)
-			if err != nil {
-				fmt.Printf("Published tx.create from Bob to Alice: %v\n", err)
+			if err := ps.PublishTxCreate(ctx, ev); err != nil {
+				fmt.Printf("Publish Bob→Alice error: %v\n", err)
 			}
 		}()
 	}
 
+	// -------------------------------
+	// 8) LOOP
+	// -------------------------------
 	for {
-		fmt.Println("Blocks:", len(bc.Blocks),
-			"Tx in block 0:", len(bc.Blocks[0].Transactions))
+		fmt.Println(
+			"Blocks:", len(bc.Blocks),
+			"Tx in block 0:", len(bc.Blocks[0].Transactions),
+		)
+
 		time.Sleep(1 * time.Second)
+	}
+}
+
+func startMetricsServer() {
+	metrics.Register()
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+
+	fmt.Println("Prometheus metrics running at http://localhost:2112/metrics")
+
+	if err := http.ListenAndServe(":2112", mux); err != nil {
+		fmt.Println("Metrics server error:", err)
 	}
 }

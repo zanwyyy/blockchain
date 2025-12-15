@@ -8,8 +8,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"project/helper"
+	"project/metrics"
+	"time"
 
 	"github.com/minio/sha256-simd"
 	"golang.org/x/crypto/ripemd160"
@@ -83,7 +84,18 @@ func MakeP2PKHScriptPubKey(addr string) ScriptPubKey {
 // - other inputs' ScriptSig.Hex = ""
 // - hash that copy and sign with priv
 // Then set original tx.Vin[i].ScriptSig.Hex = sigHex and ASM = sigHex + " " + pubkeyHex
-func (t *Transaction) SignEd25519(priv ed25519.PrivateKey, utxoSet *RedisCache) error {
+func (t *Transaction) SignEd25519(
+	priv ed25519.PrivateKey,
+	utxoSet *RedisCache,
+	mempool *RedisMempool,
+) error {
+	start := time.Now()
+	defer func() {
+		metrics.FnDuration.
+			WithLabelValues("tx_sign_duration").
+			Observe(float64(time.Since(start).Milliseconds()))
+	}()
+
 	if len(t.Vin) == 0 {
 		return errors.New("no inputs to sign")
 	}
@@ -93,51 +105,90 @@ func (t *Transaction) SignEd25519(priv ed25519.PrivateKey, utxoSet *RedisCache) 
 	for inIdx := range t.Vin {
 		vin := &t.Vin[inIdx]
 
-		// 1. Find referenced UTXO
-		utxo, ok := utxoSet.Get(vin.Txid, vin.Vout)
-		if !ok {
-			return fmt.Errorf("cannot sign: missing UTXO %s[%d]", vin.Txid, vin.Vout)
+		// -----------------------------
+		// 1) Find referenced output (UTXO or mempool output)
+		// -----------------------------
+		var prevOut VOUT
+		var ok bool
+
+		// (a) canonical UTXO
+		utxo, found := utxoSet.Get(vin.Txid, vin.Vout)
+		if found {
+			prevOut = utxo.Vout
+			ok = true
+		} else {
+			// (b) mempool output (chained tx)
+			prevOut, ok = mempool.GetOutput(vin.Txid, vin.Vout)
+			if !ok {
+				return fmt.Errorf(
+					"cannot sign: missing input %s[%d]",
+					vin.Txid,
+					vin.Vout,
+				)
+			}
 		}
 
-		// 2. Create txCopy with empty scriptsig
+		// -----------------------------
+		// 2) Create txCopy with empty scripts
+		// -----------------------------
 		txCopy := t.ShallowCopyEmptySigs()
 
-		// 3. Replace THIS input's scriptSig with ScriptPubKey
-		txCopy.Vin[inIdx].ScriptSig.Hex = utxo.Vout.ScriptPubKey.Hex
+		// -----------------------------
+		// 3) Inject ScriptPubKey for THIS input
+		// -----------------------------
+		txCopy.Vin[inIdx].ScriptSig.Hex = prevOut.ScriptPubKey.Hex
 
-		// 4. Serialize txCopy
+		// -----------------------------
+		// 4) Serialize + double SHA256
+		// -----------------------------
 		raw := txCopy.Serialize()
-
-		// 5. Double SHA256 (keep Bitcoin sighash approach)
 		h1 := sha256.Sum256(raw)
 		h2 := sha256.Sum256(h1[:])
 		sighash := h2[:]
 
-		// 6. SIGN using Ed25519
-		sig := ed25519.Sign(priv, sighash) // ALWAYS 64 bytes
+		// -----------------------------
+		// 5) Sign with Ed25519
+		// -----------------------------
+		sig := ed25519.Sign(priv, sighash) // 64 bytes
 
-		// 7. Build scriptSig = sig(64 bytes) || pub(32 bytes)
-		script := append(sig, pub...) // total 96 bytes
+		// -----------------------------
+		// 6) Build scriptSig = sig || pubkey
+		// -----------------------------
+		script := append(sig, pub...) // 96 bytes
 
 		vin.ScriptSig.Hex = hex.EncodeToString(script)
 		vin.ScriptSig.ASM = fmt.Sprintf("%x %x", sig, pub)
 	}
 
-	// 8. update txid
+	// -----------------------------
+	// 7) Update txid AFTER signing
+	// -----------------------------
 	t.Txid = t.ComputeTxID()
 	return nil
 }
 
 // VerifyTransaction: for each input, extract signature and pubkey from ScriptSig.ASM,
 // verify pubKeyHash matches prev output addresses[0], then compute sighash same as signing and verify signature.
+func VerifyForMempool(
+	t *Transaction,
+	utxoSet *RedisCache,
+	mempool *RedisMempool,
+) bool {
+	start := time.Now()
+	defer func() {
+		metrics.FnDuration.
+			WithLabelValues("tx_verify_duration").
+			Observe(float64(time.Since(start).Milliseconds()))
+	}()
 
-func VerifyUTXO(t *Transaction, utxoSet *RedisCache) bool {
-
+	// -----------------------------
+	// 0) Basic sanity checks
+	// -----------------------------
 	if len(t.Vin) == 0 || len(t.Vout) == 0 {
 		return false
 	}
 
-	// No duplicate inputs
+	// No duplicate inputs inside tx
 	seen := make(map[string]bool)
 	for _, vin := range t.Vin {
 		key := fmt.Sprintf("%s_%d", vin.Txid, vin.Vout)
@@ -149,75 +200,91 @@ func VerifyUTXO(t *Transaction, utxoSet *RedisCache) bool {
 
 	inputSum := int64(0)
 
+	// -----------------------------
+	// 1) Verify each input
+	// -----------------------------
 	for inIdx, vin := range t.Vin {
 
-		// UTXO must exist
-		utxo, ok := utxoSet.Get(vin.Txid, vin.Vout)
-		if !ok {
-			log.Println("input UTXO not found")
+		// Coinbase is NOT allowed in mempool
+		if vin.Txid == "" {
 			return false
 		}
 
+		// 1.1 Double-spend check (mempool)
+		if mempool.IsSpent(vin.Txid, vin.Vout) {
+			return false
+		}
+
+		// 1.2 Fetch referenced output
+		var prevOut VOUT
+		var ok bool
+
+		// (a) canonical UTXO
+		utxo, found := utxoSet.Get(vin.Txid, vin.Vout)
+		if found {
+			prevOut = utxo.Vout
+			ok = true
+		} else {
+			// (b) mempool output (chained tx)
+			prevOut, ok = mempool.GetOutput(vin.Txid, vin.Vout)
+			if !ok {
+				return false
+			}
+		}
+
 		// -----------------------------
-		// 1) PARSE scriptsig = sig(64) || pub(32)
+		// 2) SCRIPT & SIGNATURE VERIFY
 		// -----------------------------
+
+		// scriptSig = sig(64) || pubkey(32)
 		scriptBytes, err := hex.DecodeString(vin.ScriptSig.Hex)
-		if err != nil {
-			log.Println("invalid scriptSig hex")
-			return false
-		}
-
-		if len(scriptBytes) != 96 {
-			log.Println("scriptSig wrong length, expected 96 bytes")
+		if err != nil || len(scriptBytes) != 96 {
 			return false
 		}
 
 		sigBytes := scriptBytes[:64]
 		pubBytes := scriptBytes[64:96]
 
-		// -----------------------------
-		// 2) Compare pubkeyHash to ScriptPubKey
-		// -----------------------------
+		// Compare pubKeyHash with ScriptPubKey
 		pubKeyHashCalc := HashPubKey(pubBytes)
 
-		spk, err := hex.DecodeString(utxo.Vout.ScriptPubKey.Hex)
+		spk, err := hex.DecodeString(prevOut.ScriptPubKey.Hex)
 		if err != nil || len(spk) < 25 {
-			log.Println("invalid scriptPubKey")
 			return false
 		}
 
-		expectedHash := spk[3 : 3+20] // actual hash160(pub)
-
+		expectedHash := spk[3 : 3+20]
 		if !bytes.Equal(pubKeyHashCalc, expectedHash) {
-			log.Println("pubkey hash mismatch")
 			return false
 		}
 
 		// -----------------------------
-		// 3) Compute SIGHASH
+		// 3) Compute sighash
 		// -----------------------------
 		txCopy := t.ShallowCopyEmptySigs()
 		txCopy.Vin[inIdx].ScriptSig.Hex = hex.EncodeToString(spk)
 
 		raw := txCopy.Serialize()
-
 		h1 := sha256.Sum256(raw)
 		h2 := sha256.Sum256(h1[:])
 		sighash := h2[:]
 
 		// -----------------------------
-		// 4) Verify ED25519 signature
+		// 4) Verify signature
 		// -----------------------------
-		if !ed25519.Verify(ed25519.PublicKey(pubBytes), sighash, sigBytes) {
-			log.Println("signature invalid")
+		if !ed25519.Verify(
+			ed25519.PublicKey(pubBytes),
+			sighash,
+			sigBytes,
+		) {
 			return false
 		}
 
-		inputSum += utxo.Vout.Value
+		inputSum += prevOut.Value
 	}
 
 	// -----------------------------
-	// 5) Check outputs
+	// 5) Verify outputs
 	// -----------------------------
 	outputSum := int64(0)
 	for _, out := range t.Vout {
@@ -227,12 +294,7 @@ func VerifyUTXO(t *Transaction, utxoSet *RedisCache) bool {
 		outputSum += out.Value
 	}
 
-	if inputSum < outputSum {
-		log.Println("output > input")
-		return false
-	}
-
-	return true
+	return inputSum >= outputSum
 }
 
 // UpdateUTXOSet: cập nhật UTXO set sau khi verify thành công
@@ -282,20 +344,40 @@ func CreateTransaction(
 	toAddr string,
 	amount int64,
 	utxoSet *RedisCache,
+	mempool *RedisMempool,
+	wallet *Wallet,
+
 ) (Transaction, error) {
 
-	// --- STEP 1: Chọn UTXOs ---
-	utxos := utxoSet.FindUTXOsByAddress(fromAddr)
-	if len(utxos) == 0 {
-		return Transaction{}, errors.New("no UTXOs available for this address")
+	type inputCandidate struct {
+		Txid  string
+		Index int
+		Out   VOUT
 	}
 
-	var selected []UTXO
-	var total int64 = 0
+	var candidates []inputCandidate
 
+	// 1) get spendable UTXOs from wallet
+	utxos := wallet.GetSpendableUTXOs(mempool)
 	for _, u := range utxos {
-		selected = append(selected, u)
-		total += u.Vout.Value
+		candidates = append(candidates, inputCandidate{
+			Txid:  u.Txid,
+			Index: u.Index,
+			Out:   u.Vout,
+		})
+	}
+
+	if len(candidates) == 0 {
+		return Transaction{}, errors.New("no spendable outputs")
+	}
+
+	// 2) select inputs
+	var selected []inputCandidate
+	var total int64
+
+	for _, c := range candidates {
+		selected = append(selected, c)
+		total += c.Out.Value
 		if total >= amount {
 			break
 		}
@@ -305,12 +387,12 @@ func CreateTransaction(
 		return Transaction{}, errors.New("insufficient funds")
 	}
 
-	// --- STEP 2: Tạo VIN từ selected UTXOs ---
+	// 3) build vins
 	vins := make([]VIN, len(selected))
-	for i, u := range selected {
+	for i, in := range selected {
 		vins[i] = VIN{
-			Txid: u.Txid,
-			Vout: u.Index,
+			Txid: in.Txid,
+			Vout: in.Index,
 			ScriptSig: ScriptSig{
 				ASM: "",
 				Hex: "",
@@ -318,7 +400,7 @@ func CreateTransaction(
 		}
 	}
 
-	// --- STEP 3: Tạo VOUTs ---
+	// 4) build vouts
 	vouts := []VOUT{
 		{
 			Value:        amount,
@@ -327,28 +409,23 @@ func CreateTransaction(
 		},
 	}
 
-	// Change nếu dư
 	if total > amount {
-		changeVal := total - amount
-
 		vouts = append(vouts, VOUT{
-			Value:        changeVal,
+			Value:        total - amount,
 			N:            1,
 			ScriptPubKey: MakeP2PKHScriptPubKey(fromAddr),
 		})
 	}
 
 	tx := Transaction{
-		Version:  1,
-		Vin:      vins,
-		Vout:     vouts,
-		LockTime: 0,
+		Version: 1,
+		Vin:     vins,
+		Vout:    vouts,
 	}
 
-	// --- STEP 4: Ký transaction ---
-	signErr := tx.SignEd25519(priv, utxoSet)
-	if signErr != nil {
-		return Transaction{}, signErr
+	// 5) sign
+	if err := tx.SignEd25519(priv, utxoSet, mempool); err != nil {
+		return Transaction{}, err
 	}
 
 	return tx, nil
