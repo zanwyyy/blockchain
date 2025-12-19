@@ -7,10 +7,8 @@ import (
 
 type Wallet struct {
 	Address string
-
-	// local UTXO view (confirmed + unconfirmed)
-	utxos map[string]UTXO // key = txid:vout
-	mu    sync.Mutex
+	utxos   map[string]UTXO // key = txid:vout
+	mu      sync.Mutex
 }
 
 func NewWallet(addr string) *Wallet {

@@ -40,7 +40,7 @@ func main() {
 	// -------------------------------
 	// 2) INIT BLOCKCHAIN
 	// -------------------------------
-	bc := model.InitBlockchain("./blocks")
+	bc := model.NewBlockchain()
 
 	// -------------------------------
 	// 3) INIT WALLET MANAGER
@@ -51,7 +51,7 @@ func main() {
 	// 4) CREATE KEYS
 	// -------------------------------
 	alicePriv, alicePub := model.NewKeyPair()
-	bobPriv, bobPub := model.NewKeyPair()
+	_, bobPub := model.NewKeyPair()
 
 	aliceAddr := model.AddressFromPub(alicePub)
 	bobAddr := model.AddressFromPub(bobPub)
@@ -128,17 +128,6 @@ func main() {
 	// -------------------------------
 	fmt.Println("\n== Test: Publishing tx.create (Alice → Bob) ==")
 
-	ev1 := events.TxCreateRequest{
-		PrivateKeyHex: model.PrivToSeedHex(alicePriv),
-		FromAddr:      aliceAddr,
-		ToAddr:        bobAddr,
-		Amount:        30000,
-	}
-
-	if err := ps.PublishTxCreate(ctx, ev1); err != nil {
-		log.Println("PublishTxCreate error:", err)
-	}
-
 	time.Sleep(2 * time.Second)
 	for _, wallet := range walletManager.Wallets {
 		fmt.Printf("Wallet %s has %d UTXOs (including mempool)\n",
@@ -149,16 +138,16 @@ func main() {
 	fmt.Println("\n== Test: Publishing tx.create again (Alice → Bob) ==")
 
 	// Stress test Bob → Alice
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < 5000; i++ {
 		go func() {
 			ev := events.TxCreateRequest{
-				PrivateKeyHex: model.PrivToSeedHex(bobPriv),
-				FromAddr:      bobAddr,
-				ToAddr:        aliceAddr,
+				PrivateKeyHex: model.PrivToSeedHex(alicePriv),
+				FromAddr:      aliceAddr,
+				ToAddr:        bobAddr,
 				Amount:        1,
 			}
 			if err := ps.PublishTxCreate(ctx, ev); err != nil {
-				fmt.Printf("Publish Bob→Alice error: %v\n", err)
+				fmt.Printf("Publish Alice→Bob error: %v\n", err)
 			}
 		}()
 	}
@@ -169,7 +158,7 @@ func main() {
 	for {
 		fmt.Println(
 			"Blocks:", len(bc.Blocks),
-			"Tx in block 0:", len(bc.Blocks[0].Transactions),
+			"Tx in current block:", len(bc.CurrentBlock.Transactions),
 		)
 
 		time.Sleep(1 * time.Second)

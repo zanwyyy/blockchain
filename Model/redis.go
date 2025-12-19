@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"project/helper"
 
@@ -152,4 +154,65 @@ func (r *RedisCache) UpdateWithTransaction(tx Transaction) error {
 
 	_, err := pipe.Exec(r.ctx)
 	return err
+}
+
+func (r *RedisCache) GetAll() ([]UTXO, error) {
+	ctx := r.ctx
+
+	keys, err := r.rdb.Keys(ctx, "utxo:*").Result()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(keys) == 0 {
+		return nil, nil
+	}
+
+	values, err := r.rdb.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	var res []UTXO
+
+	for i, v := range values {
+		if v == nil {
+			continue
+		}
+
+		txid, index, ok := parseUTXOKey(keys[i])
+		if !ok {
+			continue
+		}
+
+		bytes, ok := v.(string)
+		if !ok {
+			continue
+		}
+
+		var out VOUT
+		if err := json.Unmarshal([]byte(bytes), &out); err != nil {
+			continue
+		}
+
+		res = append(res, UTXO{
+			Txid:  txid,
+			Index: index,
+			Vout:  out,
+		})
+	}
+
+	return res, nil
+}
+
+func parseUTXOKey(key string) (txid string, index int, ok bool) {
+	parts := strings.Split(key, ":")
+	if len(parts) != 3 {
+		return "", 0, false
+	}
+	i, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return "", 0, false
+	}
+	return parts[1], i, true
 }

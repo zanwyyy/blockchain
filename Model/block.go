@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/minio/sha256-simd"
@@ -24,7 +25,9 @@ type Block struct {
 }
 
 type Blockchain struct {
-	Blocks []*Block
+	mu           sync.Mutex
+	Blocks       []*Block
+	CurrentBlock *Block
 }
 
 func (bc *Blockchain) AddBlock(txs []Transaction) {
@@ -51,37 +54,49 @@ func NewGenesisBlock() *Block {
 
 func NewBlockchain() *Blockchain {
 	genesis := NewGenesisBlock()
-	return &Blockchain{Blocks: []*Block{genesis}}
+	bc := &Blockchain{
+		Blocks:       []*Block{genesis},
+		CurrentBlock: NewBlock([]Transaction{}, genesis.Hash),
+	}
+	return bc
 }
 
 func (bc *Blockchain) AddTransactionToBlock(tx Transaction) error {
-	//STEP 1: Validate
-	// if !VerifyUTXO(&tx, utxoSet) {
-	// 	return fmt.Errorf("transaction validation failed")
-	// }
 
-	// STEP 2: Block size limit 4MB
-	current := bc.Blocks[len(bc.Blocks)-1]
-	if current.CurrentSize()+tx.Size() > MaxBlockSizeBytes {
-		// finalize old block
-		current.MerkleRoot = ComputeMerkleRoot(current.Transactions)
-		current.Hash = current.BlockHash()
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
 
-		// create new block
-		newBlock := NewBlock([]Transaction{}, current.Hash)
-		bc.Blocks = append(bc.Blocks, newBlock)
-		current = newBlock
+	cb := bc.CurrentBlock
+
+	if cb.CurrentSize()+tx.Size() > MaxBlockSizeBytes {
+		return fmt.Errorf("current block full, must finalize first")
 	}
 
-	// STEP 3: Add TXss
-	current.Transactions = append(current.Transactions, tx)
+	cb.Transactions = append(cb.Transactions, tx)
+	cb.Size += tx.Size()
 
-	// STEP 5: update Merkle + Hash
-	current.MerkleRoot = ComputeMerkleRoot(current.Transactions)
-	current.Hash = current.BlockHash()
+	return nil
+}
 
-	//Update Size
-	current.Size += tx.Size()
+func (bc *Blockchain) FinalizeCurrentBlock(
+	utxoSet *RedisCache,
+) error {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	cb := bc.CurrentBlock
+
+	if err := VerifyBlock(cb, utxoSet); err != nil {
+		bc.CurrentBlock = NewBlock([]Transaction{}, bc.Blocks[len(bc.Blocks)-1].Hash)
+		return err
+	}
+
+	cb.MerkleRoot = ComputeMerkleRoot(cb.Transactions)
+	cb.Hash = cb.BlockHash()
+
+	bc.Blocks = append(bc.Blocks, cb)
+
+	bc.CurrentBlock = NewBlock([]Transaction{}, cb.Hash)
 
 	return nil
 }

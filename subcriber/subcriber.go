@@ -84,20 +84,34 @@ func SubscribeTxCreate(
 		// -----------------------------
 		// 5) Add to mempool (NOT UTXO)
 		// -----------------------------
+
 		if err := mempool.AddTransaction(tx); err != nil {
 			fmt.Println("ERROR adding tx to mempool:", err)
 			return
 		}
 
-		// 6) update wallet local utxo view
 		walletManager.ApplyUnconfirmedTx(tx)
-
 		// -----------------------------
 		// 6) Notify block builder
 		// -----------------------------
 		if err := bc.AddTransactionToBlock(tx); err != nil {
-			fmt.Println("ERROR adding tx to block builder:", err)
-			return
+			if err.Error() == "current block full, must finalize first" {
+				// finalize current block and start a new one
+				err = bc.FinalizeCurrentBlock(utxoSet)
+				if err != nil {
+					fmt.Println("ERROR finalizing block:", err)
+					return
+				}
+				fmt.Println("Block finalized. New block started.")
+				if err := bc.AddTransactionToBlock(tx); err != nil {
+					fmt.Println("ERROR adding tx to new block:", err)
+					return
+				}
+			} else {
+				fmt.Println("ERROR adding tx to block builder:", err)
+				return
+			}
 		}
+
 	})
 }

@@ -32,7 +32,7 @@ func NewBadgerUTXOSet(path string) (*BadgerUTXOSet, error) {
 }
 
 func utxoKey(txid string, index int) []byte {
-	return []byte(fmt.Sprintf("utxo:%s:%d", txid, index))
+	return []byte(fmt.Sprintf("%s:%d", txid, index))
 }
 
 func serializeVOUT(out VOUT) ([]byte, error) {
