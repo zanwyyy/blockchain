@@ -86,8 +86,8 @@ func MakeP2PKHScriptPubKey(addr string) ScriptPubKey {
 // Then set original tx.Vin[i].ScriptSig.Hex = sigHex and ASM = sigHex + " " + pubkeyHex
 func (t *Transaction) SignEd25519(
 	priv ed25519.PrivateKey,
-	utxoSet *RedisCache,
-	mempool *RedisMempool,
+	utxoSet *UTXOSet,
+	mempool *InMemoryMempool,
 ) error {
 	start := time.Now()
 	defer func() {
@@ -171,8 +171,8 @@ func (t *Transaction) SignEd25519(
 // verify pubKeyHash matches prev output addresses[0], then compute sighash same as signing and verify signature.
 func VerifyForMempool(
 	t *Transaction,
-	utxoSet *RedisCache,
-	mempool *RedisMempool,
+	utxoSet *UTXOSet,
+	mempool *InMemoryMempool,
 ) bool {
 	start := time.Now()
 	defer func() {
@@ -343,8 +343,8 @@ func CreateTransaction(
 	fromAddr string,
 	toAddr string,
 	amount int64,
-	utxoSet *RedisCache,
-	mempool *RedisMempool,
+	utxoSet *UTXOSet,
+	mempool *InMemoryMempool,
 	wallet *Wallet,
 
 ) (Transaction, error) {
@@ -539,28 +539,6 @@ func BuildP2PKHScriptSig(sig []byte, pub []byte) []byte {
 	return script
 }
 
-type UTXOView struct {
-	utxos map[string]UTXO // key = "txid:vout"
-}
-
-func NewUTXOViewFromSet(utxoSet *RedisCache) (*UTXOView, error) {
-	view := &UTXOView{
-		utxos: make(map[string]UTXO),
-	}
-
-	all, err := utxoSet.GetAll() // bạn có thể tự impl
-	if err != nil {
-		return nil, err
-	}
-
-	for _, u := range all {
-		key := string(utxoKey(u.Txid, u.Index))
-		view.utxos[key] = u
-	}
-
-	return view, nil
-}
-
 func VerifyTxWithView(
 	t *Transaction,
 	view *UTXOView,
@@ -685,13 +663,10 @@ func ApplyTxToView(tx *Transaction, view *UTXOView) {
 	}
 }
 
-func VerifyBlock(block *Block, utxoSet *RedisCache) error {
+func VerifyBlock(block *Block, utxoSet *UTXOSet) error {
 
 	// 1️⃣ init view từ UTXO set
-	view, err := NewUTXOViewFromSet(utxoSet)
-	if err != nil {
-		return err
-	}
+	view := NewUTXOViewFromSet(utxoSet)
 
 	// 2️⃣ verify từng tx theo thứ tự trong block
 	for i := range block.Transactions {
@@ -707,7 +682,7 @@ func VerifyBlock(block *Block, utxoSet *RedisCache) error {
 
 	return nil
 }
-func CommitBlock(block *Block, utxoSet *RedisCache) error {
+func CommitBlock(block *Block, utxoSet *UTXOSet) error {
 
 	for _, tx := range block.Transactions {
 

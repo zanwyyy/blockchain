@@ -19,7 +19,7 @@ func NewWallet(addr string) *Wallet {
 }
 
 func (w *Wallet) GetSpendableUTXOs(
-	mempool *RedisMempool,
+	mempool *InMemoryMempool,
 ) []UTXO {
 
 	w.mu.Lock()
@@ -35,7 +35,7 @@ func (w *Wallet) GetSpendableUTXOs(
 	return res
 }
 
-func (w *Wallet) LoadFromUTXOSet(utxoSet *RedisCache) {
+func (w *Wallet) LoadFromUTXOSet(utxoSet *UTXOSet) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 

@@ -79,7 +79,7 @@ func (bc *Blockchain) AddTransactionToBlock(tx Transaction) error {
 }
 
 func (bc *Blockchain) FinalizeCurrentBlock(
-	utxoSet *RedisCache,
+	utxoSet *UTXOSet,
 ) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()

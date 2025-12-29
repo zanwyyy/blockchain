@@ -18,7 +18,7 @@ func NewWalletManager() *WalletManager {
 
 func (wm *WalletManager) GetWallet(
 	addr string,
-	utxoSet *RedisCache,
+	utxoSet *UTXOSet,
 ) *Wallet {
 
 	wm.mu.Lock()
