@@ -1,8 +1,12 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
+
+	badger "github.com/dgraph-io/badger/v4"
 )
 
 type UTXOSet struct {
@@ -146,6 +150,118 @@ func (u *UTXOSet) Put(txid string, vout int, voutData VOUT) error {
 			u.addrIndex[addr] = make(map[string]struct{})
 		}
 		u.addrIndex[addr][key] = struct{}{}
+	}
+
+	return nil
+}
+
+func makeUTXOKey(txid string, vout int) []byte {
+	return []byte("utxo:" + txid + ":" + strconv.Itoa(vout))
+}
+
+func (u *UTXOSet) LoadFromBadger(db *badger.DB) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	u.utxos = make(map[string]UTXO)
+	u.addrIndex = make(map[string]map[string]struct{})
+
+	err := db.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+
+		prefix := []byte("utxo:")
+
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+
+			val, err := item.ValueCopy(nil)
+			if err != nil {
+				return err
+			}
+
+			var utxo UTXO
+			if err := json.Unmarshal(val, &utxo); err != nil {
+				return err
+			}
+
+			key := string(utxoKey(utxo.Txid, utxo.Index))
+			u.utxos[key] = utxo
+
+			// rebuild addrIndex
+			for _, addr := range utxo.Vout.ScriptPubKey.Addresses {
+				if _, ok := u.addrIndex[addr]; !ok {
+					u.addrIndex[addr] = make(map[string]struct{})
+				}
+				u.addrIndex[addr][key] = struct{}{}
+			}
+		}
+		return nil
+	})
+
+	return err
+}
+
+func (u *UTXOSet) PutWithDB(
+	db *badger.DB,
+	txid string,
+	vout int,
+	voutData VOUT,
+) error {
+
+	if err := u.Put(txid, vout, voutData); err != nil {
+		return err
+	}
+
+	utxo := UTXO{
+		Txid:  txid,
+		Index: vout,
+		Vout:  voutData,
+	}
+
+	data, _ := json.Marshal(utxo)
+
+	return db.Update(func(txn *badger.Txn) error {
+		return txn.Set(makeUTXOKey(txid, vout), data)
+	})
+}
+
+func (u *UTXOSet) DeleteWithDB(
+	db *badger.DB,
+	txid string,
+	vout int,
+) error {
+
+	if err := u.Delete(txid, vout); err != nil {
+		return err
+	}
+
+	return db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(makeUTXOKey(txid, vout))
+	})
+}
+
+func CommitBlockWithDB(
+	block *Block,
+	utxoSet *UTXOSet,
+	db *badger.DB,
+) error {
+
+	for _, tx := range block.Transactions {
+
+		for _, vin := range tx.Vin {
+			if vin.Txid != "" {
+				if err := utxoSet.DeleteWithDB(db, vin.Txid, vin.Vout); err != nil {
+					return err
+				}
+			}
+		}
+
+		for i, out := range tx.Vout {
+			if err := utxoSet.PutWithDB(db, tx.Txid, i, out); err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil

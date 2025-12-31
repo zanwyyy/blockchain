@@ -5,6 +5,8 @@ import (
 	"time"
 
 	model "project/Model"
+
+	"github.com/dgraph-io/badger/v4"
 )
 
 const (
@@ -17,6 +19,7 @@ type Miner struct {
 	Blockchain *model.Blockchain
 	Mempool    *model.InMemoryMempool
 	UTXOSet    *model.UTXOSet
+	DB         *badger.DB
 
 	stopCh chan struct{}
 }
@@ -25,11 +28,14 @@ func NewMiner(
 	bc *model.Blockchain,
 	mempool *model.InMemoryMempool,
 	utxoSet *model.UTXOSet,
+	db *badger.DB,
+
 ) *Miner {
 	return &Miner{
 		Blockchain: bc,
 		Mempool:    mempool,
 		UTXOSet:    utxoSet,
+		DB:         db,
 		stopCh:     make(chan struct{}),
 	}
 }
@@ -94,7 +100,7 @@ func (m *Miner) StartMiner() {
 				}
 
 				// 5️⃣ commit block
-				if err := model.CommitBlock(block, m.UTXOSet); err != nil {
+				if err := model.CommitBlock(block, m.UTXOSet, m.DB); err != nil {
 					fmt.Println("[miner] commit block failed:", err)
 					blockStart = time.Now()
 					continue

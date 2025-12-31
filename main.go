@@ -8,6 +8,7 @@ import (
 
 	model "project/Model"
 	mining "project/mining"
+	storage "project/storage"
 )
 
 func main() {
@@ -16,10 +17,19 @@ func main() {
 	// -------------------------------
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
-	fmt.Println("=== Blockchain Demo (In-Memory UTXO + Mempool) ===")
+	fmt.Println("=== Blockchain Demo (In-Memory UTXO + BadgerDB + Mempool) ===")
 
 	// -------------------------------
-	// 1) INIT IN-MEMORY STATE
+	// 1) OPEN BADGER DB
+	// -------------------------------
+	db, err := storage.OpenBadger("./data/utxo")
+	if err != nil {
+		log.Fatal("Open Badger failed:", err)
+	}
+	defer db.Close()
+
+	// -------------------------------
+	// 2) INIT IN-MEMORY STATE
 	// -------------------------------
 	utxoSet := model.NewUTXOSet()
 	mempool := model.NewInMemoryMempool()
@@ -27,9 +37,18 @@ func main() {
 	walletManager := model.NewWalletManager()
 
 	// -------------------------------
-	// 2) CREATE KEYS
+	// 3) LOAD UTXO FROM DB
 	// -------------------------------
-	alicePriv, alicePub := model.NewKeyPair()
+	if err := utxoSet.LoadFromBadger(db); err != nil {
+		log.Fatal("Load UTXO from DB failed:", err)
+	}
+
+	fmt.Println("Loaded confirmed UTXOs from DB")
+
+	// -------------------------------
+	// 4) CREATE KEYS
+	// -------------------------------
+	_, alicePub := model.NewKeyPair()
 	bobPriv, bobPub := model.NewKeyPair()
 
 	aliceAddr := model.AddressFromPub(alicePub)
@@ -39,136 +58,69 @@ func main() {
 	fmt.Println("Bob   Address:", bobAddr)
 
 	// -------------------------------
-	// 3) GENESIS UTXO (ALICE)
+	// 5) GENESIS (ONLY IF DB EMPTY)
 	// -------------------------------
-	genesis := model.Transaction{
-		Version: 1,
-		Vin:     nil,
-		Vout: []model.VOUT{
-			{
-				Value:        500000,
-				N:            0,
-				ScriptPubKey: model.MakeP2PKHScriptPubKey(aliceAddr),
+	if len(utxoSet.FindUTXOsByAddress(aliceAddr)) == 0 &&
+		len(utxoSet.FindUTXOsByAddress(bobAddr)) == 0 {
+
+		fmt.Println("\n== Insert genesis UTXOs ==")
+
+		genesisAlice := model.Transaction{
+			Version: 1,
+			Vin:     nil,
+			Vout: []model.VOUT{
+				{
+					Value:        500000,
+					N:            0,
+					ScriptPubKey: model.MakeP2PKHScriptPubKey(aliceAddr),
+				},
 			},
-		},
-		LockTime: 0,
-	}
-	genesis.Txid = genesis.ComputeTxID()
-
-	fmt.Println("\n== Insert genesis UTXO ==")
-
-	for _, out := range genesis.Vout {
-		if err := utxoSet.Put(genesis.Txid, out.N, out); err != nil {
-			log.Fatal("Insert genesis failed:", err)
 		}
-	}
+		genesisAlice.Txid = genesisAlice.ComputeTxID()
 
-	fmt.Println(
-		"Genesis done. Alice confirmed UTXOs:",
-		len(utxoSet.FindUTXOsByAddress(aliceAddr)),
-	)
+		for _, out := range genesisAlice.Vout {
+			if err := utxoSet.PutWithDB(db, genesisAlice.Txid, out.N, out); err != nil {
+				log.Fatal(err)
+			}
+		}
 
-	// -------------------------------
-	// 3b) GENESIS UTXO (BOB)
-	// -------------------------------
-	genesisBob := model.Transaction{
-		Version: 1,
-		Vin:     nil,
-		Vout: []model.VOUT{
-			{
-				Value:        100,
-				N:            0,
-				ScriptPubKey: model.MakeP2PKHScriptPubKey(bobAddr),
+		genesisBob := model.Transaction{
+			Version: 1,
+			Vin:     nil,
+			Vout: []model.VOUT{
+				{
+					Value:        10000000,
+					N:            0,
+					ScriptPubKey: model.MakeP2PKHScriptPubKey(bobAddr),
+				},
 			},
-		},
-		LockTime: 0,
-	}
-	genesisBob.Txid = genesisBob.ComputeTxID()
-
-	fmt.Println("\n== Insert genesis UTXO for Bob ==")
-
-	for _, out := range genesisBob.Vout {
-		if err := utxoSet.Put(genesisBob.Txid, out.N, out); err != nil {
-			log.Fatal("Insert genesis Bob failed:", err)
 		}
-	}
+		genesisBob.Txid = genesisBob.ComputeTxID()
 
-	fmt.Println(
-		"Genesis Bob done. Bob confirmed UTXOs:",
-		len(utxoSet.FindUTXOsByAddress(bobAddr)),
-	)
+		for _, out := range genesisBob.Vout {
+			if err := utxoSet.PutWithDB(db, genesisBob.Txid, out.N, out); err != nil {
+				log.Fatal(err)
+			}
+		}
+
+		fmt.Println("Genesis inserted")
+	}
 
 	// -------------------------------
-	// 4) INIT WALLETS
+	// 6) INIT WALLETS
 	// -------------------------------
 	aliceWallet := walletManager.GetWallet(aliceAddr, utxoSet)
 	bobWallet := walletManager.GetWallet(bobAddr, utxoSet)
 
-	fmt.Println(
-		"Alice wallet spendable:",
-		len(aliceWallet.GetSpendableUTXOs(mempool)),
-	)
-	fmt.Println(
-		"Bob wallet spendable:",
-		len(bobWallet.GetSpendableUTXOs(mempool)),
-	)
+	fmt.Println("Alice spendable:", len(aliceWallet.GetSpendableUTXOs(mempool)))
+	fmt.Println("Bob   spendable:", len(bobWallet.GetSpendableUTXOs(mempool)))
 
 	// -------------------------------
-	// 5) CREATE TX: ALICE -> BOB
+	// 7) STRESS TEST: BOB → ALICE (10 000 TX)
 	// -------------------------------
-	fmt.Println("\n== Create tx: Alice -> Bob (amount = 10) ==")
+	fmt.Println("\n== Stress test: Bob → Alice (10,000 txs) ==")
 
-	tx, err := model.CreateTransaction(
-		alicePriv,
-		aliceAddr,
-		bobAddr,
-		10,
-		utxoSet,
-		mempool,
-		aliceWallet,
-	)
-	if err != nil {
-		log.Fatal("Create tx failed:", err)
-	}
-
-	fmt.Println("Tx created:", tx.Txid)
-
-	// verify for mempool
-	if !model.VerifyForMempool(&tx, utxoSet, mempool) {
-		log.Fatal("Tx verify failed")
-	}
-
-	// add to mempool
-	if err := mempool.AddTransaction(&tx); err != nil {
-		log.Fatal("Add tx to mempool failed:", err)
-	}
-
-	fmt.Println("Tx added to mempool")
-
-	// -------------------------------
-	// 6) STATE AFTER MEMPOOL UPDATE
-	// -------------------------------
-	fmt.Println("\n== State after mempool update ==")
-
-	fmt.Println(
-		"Alice spendable (confirmed + mempool):",
-		len(aliceWallet.GetSpendableUTXOs(mempool)),
-	)
-	fmt.Println(
-		"Bob spendable (confirmed + mempool):",
-		len(bobWallet.GetSpendableUTXOs(mempool)),
-	)
-	fmt.Println(
-		"Mempool tx count:",
-		mempool.Size(),
-	)
-
-	// -------------------------------
-	// 7) CREATE TX: BOB -> ALICE (10 transactions, value = 1 each)
-	// -------------------------------
-	fmt.Println("\n== Create txs: Bob -> Alice (10 transactions, value = 1 each) ==")
-
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 10000; i++ {
 		tx, err := model.CreateTransaction(
 			bobPriv,
 			bobAddr,
@@ -179,60 +131,46 @@ func main() {
 			bobWallet,
 		)
 		if err != nil {
-			fmt.Printf("Create tx %d failed: %v\n", i, err)
-			continue
+			fmt.Printf("[tx %d] create failed: %v\n", i, err)
+			break
 		}
 
-		// verify for mempool
 		if !model.VerifyForMempool(&tx, utxoSet, mempool) {
-			fmt.Printf("Tx %d verify failed\n", i)
-			continue
+			fmt.Printf("[tx %d] verify failed\n", i)
+			break
 		}
 
-		// add to mempool
 		if err := mempool.AddTransaction(&tx); err != nil {
-			fmt.Printf("Add tx %d to mempool failed: %v\n", i, err)
-			continue
+			fmt.Printf("[tx %d] mempool add failed: %v\n", i, err)
+			break
 		}
 
-		fmt.Printf("[%d] Tx created and added: %s\n", i+1, tx.Txid[:8])
-
-		// Update wallet with unconfirmed tx
 		walletManager.ApplyUnconfirmedTx(tx)
+
+		if (i+1)%1000 == 0 {
+			fmt.Printf("  submitted %d txs\n", i+1)
+		}
 	}
 
-	// -------------------------------
-	// 8) STATE AFTER ALL TXES
-	// -------------------------------
-	fmt.Println("\n== State after all transactions ==")
-
 	fmt.Println(
-		"Alice spendable (confirmed + mempool):",
-		len(aliceWallet.GetSpendableUTXOs(mempool)),
-	)
-	fmt.Println(
-		"Bob spendable (confirmed + mempool):",
-		len(bobWallet.GetSpendableUTXOs(mempool)),
-	)
-	fmt.Println(
-		"Mempool tx count:",
+		"Mempool size after stress:",
 		mempool.Size(),
 	)
 
 	// -------------------------------
-	// 9) START MINER
+	// 8) START MINER (WITH DB)
 	// -------------------------------
 	fmt.Println("\n== Starting miner ==")
-	miner := mining.NewMiner(blockchain, mempool, utxoSet)
+	miner := mining.NewMiner(blockchain, mempool, utxoSet, db)
 	miner.StartMiner()
 
 	// -------------------------------
-	// 10) SIMPLE LOOP
+	// 9) LOOP
 	// -------------------------------
 	for {
 		fmt.Println(
 			"[Tick]",
-			"Mempool txs:", mempool.Size(),
+			"Mempool:", mempool.Size(),
 			"Blocks:", len(blockchain.Blocks),
 		)
 		time.Sleep(2 * time.Second)

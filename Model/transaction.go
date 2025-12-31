@@ -12,6 +12,7 @@ import (
 	"project/metrics"
 	"time"
 
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/minio/sha256-simd"
 	"golang.org/x/crypto/ripemd160"
 )
@@ -682,20 +683,28 @@ func VerifyBlock(block *Block, utxoSet *UTXOSet) error {
 
 	return nil
 }
-func CommitBlock(block *Block, utxoSet *UTXOSet) error {
+func CommitBlock(
+	block *Block,
+	utxoSet *UTXOSet,
+	db *badger.DB,
+) error {
 
 	for _, tx := range block.Transactions {
 
-		// remove spent
+		// remove spent inputs
 		for _, vin := range tx.Vin {
-			if err := utxoSet.Delete(vin.Txid, vin.Vout); err != nil {
+			if vin.Txid == "" {
+				continue
+			}
+
+			if err := utxoSet.DeleteWithDB(db, vin.Txid, vin.Vout); err != nil {
 				return err
 			}
 		}
 
 		// add new outputs
 		for i, out := range tx.Vout {
-			if err := utxoSet.Put(tx.Txid, i, out); err != nil {
+			if err := utxoSet.PutWithDB(db, tx.Txid, i, out); err != nil {
 				return err
 			}
 		}
