@@ -92,6 +92,12 @@ func (m *Miner) StartMiner() {
 					snap.Size,
 				)
 
+				if err := model.VerifyMerkleRoot(block); err != nil {
+					fmt.Printf("[miner] block verification failed: %v\n", err)
+					blockStart = time.Now()
+					continue
+				}
+
 				// 4️⃣ verify block using VerifyBlock (proper verification)
 				if err := model.VerifyBlock(block, m.UTXOSet); err != nil {
 					fmt.Printf("[miner] block verification failed: %v\n", err)
@@ -114,10 +120,12 @@ func (m *Miner) StartMiner() {
 					m.Mempool.RemoveTransaction(&tx)
 				}
 
+				duration := time.Since(blockStart)
 				fmt.Printf(
-					"[miner] block committed | height=%d | txs=%d\n",
+					"[miner] block committed | height=%d | txs=%d | time=%v\n",
 					len(m.Blockchain.Blocks),
 					len(block.Transactions),
+					duration,
 				)
 
 				blockStart = time.Now()

@@ -683,6 +683,14 @@ func VerifyBlock(block *Block, utxoSet *UTXOSet) error {
 
 	return nil
 }
+func VerifyMerkleRoot(block *Block) error {
+	calculated := ComputeMerkleRoot(block.Transactions)
+	if !bytes.Equal(calculated, block.MerkleRoot) {
+		return fmt.Errorf("invalid merkle root")
+	}
+	return nil
+}
+
 func CommitBlock(
 	block *Block,
 	utxoSet *UTXOSet,
