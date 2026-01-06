@@ -67,10 +67,8 @@ func (m *Miner) StartMiner() {
 					continue
 				}
 
-				// 2️⃣ check block condition
-				if snap.Size < MaxBlockSizeBytes &&
-					time.Since(blockStart) < BlockInterval {
-					continue
+				if snap.Size < MaxBlockSizeBytes/2 {
+					continue // Đợi thêm tx
 				}
 
 				// 3️⃣ build block
