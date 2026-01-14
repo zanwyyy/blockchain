@@ -180,9 +180,15 @@ func (u *UTXOSet) LoadFromBadger(db *badger.DB) error {
 				return err
 			}
 
-			var utxo UTXO
-			if err := json.Unmarshal(val, &utxo); err != nil {
-				return err
+			// Try binary deserialization first (new format)
+			utxo, err := deserializeUTXOBinary(val)
+			if err != nil {
+				// Fallback to JSON for backward compatibility (old data)
+				var jsonUTXO UTXO
+				if err := json.Unmarshal(val, &jsonUTXO); err != nil {
+					return fmt.Errorf("failed to deserialize UTXO (binary and json): %v", err)
+				}
+				utxo = jsonUTXO
 			}
 
 			key := string(utxoKey(utxo.Txid, utxo.Index))

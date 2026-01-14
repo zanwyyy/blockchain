@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	MaxBlockSizeBytes = 1 * 1024 * 1024 // 1MB
+	MaxBlockSizeBytes = 4 * 1024 * 1024 // 1MB
 	BlockInterval     = 5 * time.Second
 	MinerIdleSleep    = 100 * time.Millisecond
 )

@@ -120,7 +120,7 @@ func main() {
 	// -------------------------------
 	fmt.Println("\n== Stress test: Bob → Alice (10,000 txs) ==")
 
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < 30000; i++ {
 		tx, err := model.CreateTransaction(
 			bobPriv,
 			bobAddr,
